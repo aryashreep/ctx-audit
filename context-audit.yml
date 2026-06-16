@@ -1,0 +1,42 @@
+# Drop this in: .github/workflows/context-audit.yml
+#
+# Fails the PR if AGENTS.md / memory.md are missing or stale relative to
+# recent commits in the watched source paths. Uses the same scripts/audit.mjs
+# that powers the agent-invoked skill, so the rules live in exactly one place.
+
+name: Context Audit
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "lib/**"
+      - "app/**"
+      - "AGENTS.md"
+      - "memory.md"
+      - ".agent/**"
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history required — staleness check counts commits since last_synced_commit
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run context audit
+        run: node scripts/audit.mjs --strict
+
+      # Optional: also emit a JSON report as a PR artifact / sticky comment.
+      # - name: Generate JSON report
+      #   if: always()
+      #   run: node scripts/audit.mjs --json > audit-report.json
+      # - uses: actions/upload-artifact@v4
+      #   if: always()
+      #   with:
+      #     name: context-audit-report
+      #     path: audit-report.json
