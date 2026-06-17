@@ -1,0 +1,30 @@
+name: "ctx-audit"
+description: "Audit persistent AI context files for freshness and token cost"
+inputs:
+  strict:
+    description: "Exit 1 on any failure (missing required file or stale file)"
+    required: false
+    default: "true"
+  json:
+    description: "Output machine-readable JSON"
+    required: false
+    default: "false"
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+
+    - name: Run ctx-audit
+      shell: bash
+      run: |
+        FLAGS=""
+        if [ "${{ inputs.strict }}" = "true" ]; then
+          FLAGS="$FLAGS --strict"
+        fi
+        if [ "${{ inputs.json }}" = "true" ]; then
+          FLAGS="$FLAGS --json"
+        fi
+        node ${{ github.action_path }}/scripts/audit.mjs $FLAGS

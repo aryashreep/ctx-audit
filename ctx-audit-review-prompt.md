@@ -266,11 +266,11 @@ function main() {
 main();
 ```
 
-`skill/SKILL.md` (for installation via `npx skills add <owner>/<repo> --skill context-audit`):
+`skill/SKILL.md` (for installation via `npx skills add <owner>/<repo> --skill ctx-audit`):
 
 ```markdown
 ---
-name: context-audit
+name: ctx-audit
 description: Use this skill at the very start of any non-trivial session in a repository — before doing a manual directory scan, before trusting claims in memory.md or AGENTS.md, and before re-deriving project structure from scratch. It checks whether the repo's persistent context files (AGENTS.md, memory.md, .agent/graph.md) exist and are current relative to recent commits, and estimates how many tokens they save vs. re-discovering everything by reading source directly. Trigger this whenever the user asks to "get up to speed," "check context files," "audit memory," "is this repo set up for agents," or whenever you're about to spend a large number of tool calls exploring an unfamiliar codebase — run this first, it's cheap.
 ---
 
@@ -302,7 +302,7 @@ needs `git` to resolve relative to the repo):
     node <path-to-this-skill-folder>/scripts/audit.mjs
 
 (The exact path depends on where the skills CLI installed this skill for your
-agent — e.g. `.claude/skills/context-audit/scripts/audit.mjs`.)
+agent — e.g. `.claude/skills/ctx-audit/scripts/audit.mjs`.)
 
 Flags:
 - `--json` — machine-readable output.
@@ -325,7 +325,7 @@ Each file opens with `last_synced_commit: <git sha>` frontmatter.
 - .agent/graph.md (optional): one paragraph per module, not file contents.
 ```
 
-`action/context-audit.yml` (drop into `.github/workflows/`):
+`action/ctx-audit.yml` (drop into `.github/workflows/`):
 
 ```yaml
 name: Context Audit

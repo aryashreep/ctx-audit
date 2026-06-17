@@ -1,4 +1,4 @@
-# Drop this in: .github/workflows/context-audit.yml
+# Drop this in: .github/workflows/ctx-audit.yml
 #
 # Fails the PR if AGENTS.md / memory.md are missing or stale relative to
 # recent commits in the watched source paths. Uses the same scripts/audit.mjs
@@ -38,5 +38,5 @@ jobs:
       # - uses: actions/upload-artifact@v4
       #   if: always()
       #   with:
-      #     name: context-audit-report
+      #     name: ctx-audit-report
       #     path: audit-report.json

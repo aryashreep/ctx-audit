@@ -3,44 +3,66 @@
 Checks whether a repo's persistent context files (`AGENTS.md`, `memory.md`,
 `.agent/graph.md`) exist and are current — and estimates how many tokens
 they save an AI agent vs. re-discovering everything from raw source each
-session. One core script, two install paths.
+session. Zero dependencies, single script, three install paths.
+
+## Install
+
+### npx (no install)
+
+```bash
+npx ctx-audit
+```
+
+### Global install
+
+```bash
+npm i -g ctx-audit
+ctx-audit
+```
+
+### Agent skill (skills.sh)
+
+```
+npx skills add <you>/<repo> --skill ctx-audit
+```
+
+### CI gate (GitHub Action)
+
+```yaml
+# .github/workflows/ctx-audit.yml
+- uses: <owner>/ctx-audit@v1
+  with:
+    strict: "true"   # exit 1 on failure (default)
+    json: "false"     # JSON output (default: false)
+```
+
+Or copy `action/ctx-audit.yml` into `.github/workflows/` for the
+standalone workflow approach.
 
 ## Layout
 
 ```
 ctx-audit/
-├── scripts/audit.mjs        core logic (no dependencies, plain Node)
-├── skill/
-│   ├── SKILL.md             agent-invoked path, distributed via skills.sh
-│   └── scripts/audit.mjs    same script, bundled for the skill
-└── action/
-    └── context-audit.yml    CI gate, drop into .github/workflows/
+├── package.json
+├── action.yml              composite GitHub Action
+├── scripts/audit.mjs       core logic (no dependencies, plain Node >=18)
+├── skill/SKILL.md          agent-invoked path
+├── action/ctx-audit.yml     CI workflow template (copy into target repo)
+└── README.md
 ```
 
-## Path 1 — agent-invoked (skills.sh)
+## Usage
 
-Publish `skill/` as a skill in a public repo, then anyone installs it with:
-
+```bash
+npx ctx-audit              # human-readable report
+npx ctx-audit --json       # machine-readable JSON
+npx ctx-audit --strict     # exit 1 on any failure (for CI)
+npx ctx-audit --ci         # alias for --strict --json
+npx ctx-audit --init       # print AGENTS.md + memory.md templates to stdout
+npx ctx-audit --help       # show usage and exit
 ```
-npx skills add <you>/<repo> --skill context-audit
-```
 
-This is the "soft" check — an agent reads SKILL.md and decides to run it
-(e.g. at the start of a session, before exploring the repo manually). It's
-advisory, not enforced.
-
-## Path 2 — CI gate (GitHub Action)
-
-Copy `action/context-audit.yml` into the target repo's
-`.github/workflows/`, and copy `scripts/audit.mjs` into the repo (e.g. at
-`scripts/audit.mjs`, matching the path the workflow calls). This is the
-"hard" check — PRs fail if context files are missing or stale, regardless of
-whether anyone remembered to ask an agent to check.
-
-Both paths call the same script, so the rules for what counts as "stale" or
-"over budget" live in one place.
-
-## The convention itself
+## The convention
 
 Three files, each opening with frontmatter pinning the commit it was last
 verified against:
@@ -59,23 +81,98 @@ last_synced_commit: <git sha>
   what it talks to. Not file contents, not a full tree.
 
 Whenever you touch what one of these files claims, update its content *and*
-its `last_synced_commit` to current HEAD — that's what lets the audit detect
-drift instead of trusting a file forever.
+its `last_synced_commit` to current HEAD.
+
+## Configuration
+
+Place `.ctx-audit.json` in the repo root. All fields are optional:
+
+```jsonc
+{
+  "files": [
+    { "id": "agents", "file": "AGENTS.md", "label": "Agent instructions", "maxTokens": 1500, "required": true },
+    { "id": "memory", "file": "memory.md", "label": "Decision log", "maxTokens": 2500, "required": true }
+  ],
+  "sourceDirs": ["src", "packages/core"],
+  "staleThreshold": 10,
+  "baselineFileCap": 300
+}
+```
+
+- **`files`** — replaces the default file list entirely (not merge). If you
+  customize this, list all files you want audited.
+- **`sourceDirs`** — directories treated as "real source" for staleness and
+  baseline. When omitted, auto-detected from git tracked files (top 5 dirs
+  by file count), falling back to `["src", "lib", "app"]`.
+- **`staleThreshold`** — number of source commits before a file is considered
+  stale. Default: `5`.
+- **`baselineFileCap`** — max source files to tokenize for baseline estimate.
+  Default: `200`.
+
+## `watches:` frontmatter field
+
+Scope staleness checks to specific paths instead of all source directories:
+
+```markdown
+---
+last_synced_commit: abc1234
+watches: src/auth/**, src/api/**
+---
+```
+
+Comma-separated git pathspecs. When present, only commits touching those paths
+count toward staleness, making the check more precise for files that document
+a specific subsystem.
+
+## Graduated staleness
+
+Instead of binary stale/fresh, ctx-audit reports 4 levels:
+
+| Level | Commits since sync | Display | Counts as failure? |
+|---|---|---|---|
+| `fresh` | 0 to threshold×0.5 | `[FRESH]` | No |
+| `possibly-stale` | threshold×0.5 to threshold | `[STALE?]` | No |
+| `likely-stale` | threshold to threshold×2 | `[STALE!]` | Yes |
+| `stale` | >threshold×2 | `[STALE]` | Yes |
+
+The JSON report includes both `stalenessLevel` (string) and `stale` (boolean)
+for backward compatibility.
+
+## Additional checks
+
+- **Stale-bump detection:** If a file's body is identical at `last_synced_commit`
+  vs. current HEAD but source commits exist, a warning is emitted: "SHA bumped
+  but content unchanged." This catches mechanical SHA updates without real
+  review. Warning only, not a failure.
+- **Dead reference detection:** Backtick-quoted paths and bare `dir/file.ext`
+  patterns in context files are checked against the filesystem. Missing paths
+  are reported as warnings.
+
+## `--init` scaffolding
+
+```bash
+npx ctx-audit --init > /dev/null  # preview
+npx ctx-audit --init              # prints AGENTS.md + memory.md templates
+```
+
+Detects project info from `package.json`, `pyproject.toml`, `Cargo.toml`, or
+`Makefile` and fills in build/test/lint commands. Output goes to stdout only —
+the tool never writes files directly. Redirect as needed.
+
+## Companion tools
+
+**Graphify** (`/graphify` in Claude Code, or `npx graphifyy` standalone) can
+auto-generate the `.agent/graph.md` architecture map by building a knowledge
+graph from your codebase. When ctx-audit reports high baseline token costs or a
+missing graph file, running Graphify is the fastest way to close the gap.
 
 ## Token estimate caveat
 
-The script uses a chars/4 heuristic for token counts — fast, dependency-free,
-and directionally useful, but not exact. Swap in a real tokenizer (tiktoken,
-or Anthropic's `count_tokens` endpoint) if you need precise numbers. The
-"baseline" estimate (what it'd cost without these files) is also a
-simplification — it sums the tracked source tree up to a file cap, which is a
-proxy for "an agent reading everything," not a guarantee of what any
-particular agent would actually do.
+The script uses a ~3.5 chars/token heuristic — fast, dependency-free, and
+directionally useful, but not exact. All token counts in the output are labeled
+`est.` to make this clear. The "baseline" estimate (cost without context files)
+sums tracked source files up to a cap, which is a proxy for "an agent reading
+everything," not a guarantee of what any particular agent would actually do.
 
-## Try it locally
-
-```bash
-node scripts/audit.mjs            # human-readable
-node scripts/audit.mjs --json     # machine-readable
-node scripts/audit.mjs --strict   # exit 1 on failure, for CI
-```
+The savings ratio (e.g., `12.0x smaller`) shows how much more compact the
+curated context is compared to reading raw source.
