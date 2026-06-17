@@ -1,6 +1,6 @@
 {
   "name": "ctx-audit",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Audit persistent context files (AGENTS.md, memory.md) for AI agent freshness and token cost",
   "type": "module",
   "bin": {
@@ -8,6 +8,7 @@
   },
   "files": [
     "scripts/audit.mjs",
+    "skill/SKILL.md",
     "README.md"
   ],
   "engines": {
@@ -21,7 +22,11 @@
     "staleness",
     "tokens",
     "claude",
-    "copilot"
+    "copilot",
+    "claude-code",
+    "git-hook",
+    "skill",
+    "onboarding"
   ],
   "license": "MIT",
   "repository": {

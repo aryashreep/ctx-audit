@@ -1,9 +1,35 @@
 # ctx-audit
 
+[![npm version](https://img.shields.io/npm/v/ctx-audit.svg)](https://www.npmjs.com/package/ctx-audit)
+[![zero dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)](https://www.npmjs.com/package/ctx-audit)
+[![Node >=18](https://img.shields.io/node/v/ctx-audit.svg)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+![ctx-audit demo](docs/demo.png)
+
 Checks whether a repo's persistent context files (`AGENTS.md`, `memory.md`,
 `.agent/graph.md`) exist and are current — and estimates how many tokens
 they save an AI agent vs. re-discovering everything from raw source each
 session. Zero dependencies, single script, three install paths.
+
+## Getting started in 60 seconds
+
+```bash
+# 1. Install skill into Claude Code + register trigger
+npx ctx-audit install
+
+# 2. Wire up a git pre-push guard
+npx ctx-audit hook install
+
+# 3. Tell agents in this repo to run it at session start
+npx ctx-audit claude install
+
+# 4. Scaffold AGENTS.md + memory.md (interactive — writes files directly)
+npx ctx-audit --init
+
+# 5. Run your first audit
+npx ctx-audit
+```
 
 ## Install
 
@@ -22,15 +48,15 @@ ctx-audit
 
 ### Agent skill (skills.sh)
 
-```
-npx skills add <you>/<repo> --skill ctx-audit
+```bash
+npx skills add aryashreep/ctx-audit --skill ctx-audit
 ```
 
 ### CI gate (GitHub Action)
 
 ```yaml
 # .github/workflows/ctx-audit.yml
-- uses: <owner>/ctx-audit@v1
+- uses: aryashreep/ctx-audit@v1
   with:
     strict: "true"   # exit 1 on failure (default)
     json: "false"     # JSON output (default: false)
@@ -39,6 +65,30 @@ npx skills add <you>/<repo> --skill ctx-audit
 Or copy `action/ctx-audit.yml` into `.github/workflows/` for the
 standalone workflow approach.
 
+## Subcommands
+
+| Command | What it does |
+|---|---|
+| `ctx-audit install` | Copy skill to `~/.claude/skills/ctx-audit/`, register `/ctx-audit` trigger in `~/.claude/CLAUDE.md` |
+| `ctx-audit hook install` | Append `npx ctx-audit --strict` to `.git/hooks/pre-push` (idempotent) |
+| `ctx-audit hook uninstall` | Remove ctx-audit lines from pre-push hook |
+| `ctx-audit hook status` | Check whether the hook is installed |
+| `ctx-audit claude install` | Append a `## ctx-audit` section to project `CLAUDE.md` (idempotent) |
+| `ctx-audit claude uninstall` | Remove the ctx-audit section from project `CLAUDE.md` |
+| `ctx-audit benchmark` | Print token savings in a focused, shareable format |
+
+## Flags
+
+```bash
+npx ctx-audit              # human-readable report (colored in TTY)
+npx ctx-audit --json       # machine-readable JSON
+npx ctx-audit --strict     # exit 1 on any failure (for CI)
+npx ctx-audit --ci         # alias for --strict --json
+npx ctx-audit --init       # write AGENTS.md + memory.md to disk (interactive TTY)
+                           # or print templates to stdout when piped
+npx ctx-audit --help       # show usage and exit
+```
+
 ## Layout
 
 ```
@@ -46,21 +96,42 @@ ctx-audit/
 ├── package.json
 ├── action.yml              composite GitHub Action
 ├── scripts/audit.mjs       core logic (no dependencies, plain Node >=18)
-├── skill/SKILL.md          agent-invoked path
+├── skill/SKILL.md          agent-invoked path (30+ trigger phrases)
 ├── action/ctx-audit.yml     CI workflow template (copy into target repo)
 └── README.md
 ```
 
-## Usage
+## Prompting (as a Claude Code skill)
 
-```bash
-npx ctx-audit              # human-readable report
-npx ctx-audit --json       # machine-readable JSON
-npx ctx-audit --strict     # exit 1 on any failure (for CI)
-npx ctx-audit --ci         # alias for --strict --json
-npx ctx-audit --init       # print AGENTS.md + memory.md templates to stdout
-npx ctx-audit --help       # show usage and exit
-```
+Once installed as a skill (`ctx-audit install`), you can trigger ctx-audit with natural language:
+
+| Prompt | What happens |
+|---|---|
+| "audit my context files" | Runs the audit, reports freshness |
+| "check context" / "is this repo set up for agents?" | Same — triggers the skill |
+| "get me up to speed on this repo" | Runs audit first, then reads the fresh files |
+| "is my memory.md stale?" | Runs audit, focuses on staleness |
+| "scaffold context files" / "init context" | Runs `--init` to write templates |
+| "benchmark token savings" | Runs `benchmark` subcommand |
+| "add ctx-audit to CI" | Suggests hook install + CI workflow |
+
+**When should an agent run it?** At the start of any non-trivial session — before
+trusting claims in `AGENTS.md` or `memory.md` (a stale file is worse than none),
+before doing a broad exploratory pass reading many files to understand structure,
+and before re-deriving project conventions from scratch.
+
+## Interpreting results
+
+| Result | Meaning | Action |
+|---|---|---|
+| **MISSING** (required) | File doesn't exist | Run `npx ctx-audit --init` to scaffold, then fill in TODOs |
+| **FRESH** | Up to date | Trust the file, read it instead of scanning raw source |
+| **STALE?** | Approaching threshold | Mild caution — spot-check critical claims |
+| **STALE!** | Past threshold | Treat claims as unverified; update the file after your session |
+| **STALE** | Significantly behind | Same as STALE! but more urgent |
+| **Dead references** | Paths in context files point to deleted files | Update the references |
+| **Over budget** | File token count exceeds `maxTokens` | Trim the file down |
+| **SHA bumped but content unchanged** | Commit SHA updated without real edits | Review whether the file actually reflects recent changes |
 
 ## The convention
 
@@ -151,13 +222,14 @@ for backward compatibility.
 ## `--init` scaffolding
 
 ```bash
-npx ctx-audit --init > /dev/null  # preview
-npx ctx-audit --init              # prints AGENTS.md + memory.md templates
+npx ctx-audit --init         # interactive: writes AGENTS.md + memory.md to disk
+npx ctx-audit --init | cat   # piped: prints templates to stdout
 ```
 
 Detects project info from `package.json`, `pyproject.toml`, `Cargo.toml`, or
-`Makefile` and fills in build/test/lint commands. Output goes to stdout only —
-the tool never writes files directly. Redirect as needed.
+`Makefile` and fills in build/test/lint commands. In an interactive terminal
+it writes files directly and asks before overwriting existing ones. When
+piped or redirected it prints to stdout for backward compatibility.
 
 ## Companion tools
 

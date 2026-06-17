@@ -9,13 +9,38 @@
  *   node scripts/audit.mjs --json       machine-readable report
  *   node scripts/audit.mjs --strict     exit 1 on any failure (for CI)
  *   node scripts/audit.mjs --ci         alias for --strict --json
- *   node scripts/audit.mjs --init       print scaffolding templates to stdout
+ *   node scripts/audit.mjs --init       write AGENTS.md + memory.md (interactive) or print to stdout
  *   node scripts/audit.mjs --help       show usage and exit
+ *   node scripts/audit.mjs install      copy skill to ~/.claude/skills/, register in CLAUDE.md
+ *   node scripts/audit.mjs hook [install|uninstall|status]  manage pre-push git hook
+ *   node scripts/audit.mjs claude [install|uninstall]        manage project CLAUDE.md section
+ *   node scripts/audit.mjs benchmark    show token savings summary
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import {
+  existsSync, readFileSync, mkdirSync, copyFileSync,
+  writeFileSync, chmodSync, readSync,
+} from "node:fs";
 import { execSync } from "node:child_process";
-import { join, basename } from "node:path";
+import { join, basename, dirname } from "node:path";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// ---- color system ----
+const USE_COLOR = process.stdout.isTTY && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
+const c = {
+  reset:  USE_COLOR ? '\x1b[0m'  : '',
+  bold:   USE_COLOR ? '\x1b[1m'  : '',
+  dim:    USE_COLOR ? '\x1b[2m'  : '',
+  green:  USE_COLOR ? '\x1b[32m' : '',
+  yellow: USE_COLOR ? '\x1b[33m' : '',
+  red:    USE_COLOR ? '\x1b[31m' : '',
+  cyan:   USE_COLOR ? '\x1b[36m' : '',
+  gray:   USE_COLOR ? '\x1b[90m' : '',
+};
 
 // ---- defaults ----
 const DEFAULT_FILES = [
@@ -28,9 +53,16 @@ const DEFAULT_SOURCE_DIRS = ["src", "lib", "app"];
 const DEFAULT_STALE_THRESHOLD = 5;
 const DEFAULT_BASELINE_FILE_CAP = 200;
 
+// ---- subcommand set ----
+const SUBCOMMANDS = new Set(['install', 'hook', 'claude', 'benchmark']);
+
 // ---- argument parsing ----
 function parseArgs(argv) {
+  const sub = argv[0] && !argv[0].startsWith('-') && SUBCOMMANDS.has(argv[0]) ? argv[0] : null;
+  const subArgs = sub ? argv.slice(1) : [];
   return {
+    sub,
+    subArgs,
     json: argv.includes("--json"),
     strict: argv.includes("--strict"),
     ci: argv.includes("--ci"),
@@ -49,10 +81,8 @@ function resolveConfig(overrides = {}) {
     // no config file or invalid JSON — use defaults
   }
 
-  // files: config replaces entirely (not merge), then overrides can replace again
   const files = overrides.files || fileConfig.files || DEFAULT_FILES;
 
-  // sourceDirs: config > auto-detect > fallback
   let sourceDirs;
   if (overrides.sourceDirs) {
     sourceDirs = overrides.sourceDirs;
@@ -71,7 +101,6 @@ function resolveConfig(overrides = {}) {
 // ---- auto-detect source dirs ----
 function autoDetectSourceDirs() {
   const skipDirs = new Set(["node_modules", "dist", "build", "coverage", ".git", ".github", ".vscode", ".idea"]);
-  const skipPatterns = [/^\./, /\./]; // dot-dirs and files with extensions (config files at root)
 
   const tree = sh("git ls-files");
   if (!tree) return DEFAULT_SOURCE_DIRS.filter((d) => existsSync(d));
@@ -79,7 +108,7 @@ function autoDetectSourceDirs() {
   const counts = {};
   for (const f of tree.split("\n").filter(Boolean)) {
     const top = f.split("/")[0];
-    if (top === f) continue; // root-level file, skip
+    if (top === f) continue;
     if (skipDirs.has(top)) continue;
     if (top.startsWith(".")) continue;
     counts[top] = (counts[top] || 0) + 1;
@@ -156,12 +185,20 @@ function graduateStaleness(commitCount, threshold) {
   return { level: "stale", stale: true };
 }
 
-const STALENESS_DISPLAY = {
-  fresh: "[FRESH   ]",
-  "possibly-stale": "[STALE?  ]",
-  "likely-stale": "[STALE!  ]",
-  stale: "[STALE   ]",
-};
+// ---- status badge with colors ----
+function statusBadge(r) {
+  if (!r.exists) {
+    if (r.required) return `${c.bold}${c.red}[MISSING ]${c.reset}`;
+    return `${c.dim}[absent  ]${c.reset}`;
+  }
+  switch (r.stalenessLevel) {
+    case 'fresh':          return `${c.green}[FRESH   ]${c.reset}`;
+    case 'possibly-stale': return `${c.yellow}[STALE?  ]${c.reset}`;
+    case 'likely-stale':   return `${c.red}[STALE!  ]${c.reset}`;
+    case 'stale':          return `${c.bold}${c.red}[STALE   ]${c.reset}`;
+    default:               return `${c.cyan}[OK      ]${c.reset}`;
+  }
+}
 
 // ---- dead reference detection ----
 function detectDeadReferences(text) {
@@ -181,14 +218,12 @@ function detectDeadReferences(text) {
   const barePaths = body.matchAll(/(?<![`\/])(?:^|[\s(])([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.\/-]+\.[a-zA-Z]{1,10})(?=[)\s,;:]|$)/gm);
   for (const m of barePaths) {
     const p = m[1];
-    // Skip URLs and already-caught backtick paths
     if (p.includes("://") || p.startsWith("http")) continue;
     if (!existsSync(p)) {
       warnings.push(`dead reference: ${p} not found`);
     }
   }
 
-  // Deduplicate
   return [...new Set(warnings)];
 }
 
@@ -196,11 +231,9 @@ function detectDeadReferences(text) {
 function detectStaleBump(filePath, sha) {
   if (!sha) return null;
 
-  // Get file content at the synced commit
   const oldContent = sh(`git show ${sha}:${filePath}`);
   if (oldContent === null) return null;
 
-  // Get current file content
   let currentContent;
   try {
     currentContent = readFileSync(filePath, "utf8");
@@ -246,10 +279,8 @@ function checkFile(entry, config) {
   const fm = parseFrontmatter(text);
   const sha = fm.last_synced_commit;
 
-  // Determine which dirs to check for staleness
   let dirs;
   if (fm.watches) {
-    // Use watches pathspecs instead of global source dirs
     dirs = fm.watches.split(",").map((s) => s.trim()).filter(Boolean);
   } else {
     dirs = existingSourceDirs(config);
@@ -275,14 +306,12 @@ function checkFile(entry, config) {
       }
     }
 
-    // Stale-bump detection
     const bumpWarning = detectStaleBump(entry.file, sha);
     if (bumpWarning && count > 0) {
       result.warnings.push(bumpWarning);
     }
   }
 
-  // Dead reference detection
   const deadRefs = detectDeadReferences(text);
   result.warnings.push(...deadRefs);
 
@@ -354,39 +383,38 @@ function buildReport(config) {
 
 // ---- human-readable output ----
 function printText(report) {
-  console.log("Context Audit");
-  console.log("=".repeat(40));
+  console.log(`\n${c.bold}${c.cyan}Context Audit${c.reset}`);
+  console.log(c.dim + "=".repeat(40) + c.reset);
   for (const r of report.checks) {
-    let status;
-    if (!r.exists) {
-      status = r.required ? "MISSING " : "absent  ";
-    } else if (r.stalenessLevel && STALENESS_DISPLAY[r.stalenessLevel]) {
-      status = STALENESS_DISPLAY[r.stalenessLevel].slice(1, -1); // strip brackets for alignment
-    } else {
-      status = "OK      ";
-    }
-    console.log(`[${status}] ${r.file}  (~${r.tokens} tok est.)`);
-    for (const issue of r.issues) console.log(`           - ${issue}`);
-    for (const w of r.warnings) console.log(`           - [warn] ${w}`);
+    const badge = statusBadge(r);
+    console.log(`${badge} ${c.bold}${r.file}${c.reset}  ${c.gray}(~${r.tokens} tok est.)${c.reset}`);
+    for (const issue of r.issues) console.log(`           ${c.red}- ${issue}${c.reset}`);
+    for (const w of r.warnings) console.log(`           ${c.yellow}- [warn] ${w}${c.reset}`);
   }
-  console.log("-".repeat(40));
+  console.log(c.dim + "-".repeat(40) + c.reset);
   console.log(`Curated context cost:  ~${report.curatedTokens} tok est.`);
   if (report.baselineTokens) {
     console.log(`Baseline w/o context:  ~${report.baselineTokens} tok est.`);
-    let savingsLine = `Estimated savings:     ~${report.estimatedSavingsPct}%`;
+    let savingsLine = `Estimated savings:     ${c.cyan}~${report.estimatedSavingsPct}%`;
     if (report.savingsRatio) {
       savingsLine += ` (${report.savingsRatio}x smaller)`;
     }
+    savingsLine += c.reset;
     console.log(savingsLine);
   } else {
     console.log("Baseline w/o context:  n/a (no source dirs found to estimate against)");
   }
-  console.log(report.pass ? "\nResult: PASS" : "\nResult: FAIL");
+
+  if (report.pass) {
+    console.log(`\n${c.bold}${c.green}Result: PASS${c.reset}`);
+  } else {
+    console.log(`\n${c.bold}${c.red}Result: FAIL${c.reset}`);
+  }
 
   if (report.suggestions.length > 0) {
     console.log("\nSuggestions:");
     for (const s of report.suggestions) {
-      console.log(`  → ${s.message}`);
+      console.log(`  ${c.cyan}→ ${s.message}${c.reset}`);
     }
   }
 }
@@ -396,14 +424,22 @@ function printHelp() {
   console.log(`ctx-audit — audit persistent context files for AI agents
 
 Usage:
-  node scripts/audit.mjs [flags]
-  npx ctx-audit [flags]
+  npx ctx-audit [subcommand] [flags]
+
+Subcommands:
+  install              Copy skill to ~/.claude/skills/, register in CLAUDE.md
+  hook install         Write pre-push git hook (--strict audit on every push)
+  hook uninstall       Remove ctx-audit from pre-push hook
+  hook status          Check if hook is installed
+  claude install       Add ctx-audit section to project CLAUDE.md
+  claude uninstall     Remove ctx-audit section from project CLAUDE.md
+  benchmark            Show token savings in focused, shareable format
 
 Flags:
   --json       Machine-readable JSON output
   --strict     Exit 1 on any failure (missing required file or stale file)
   --ci         Alias for --strict --json
-  --init       Print AGENTS.md and memory.md scaffolding templates to stdout
+  --init       Write AGENTS.md + memory.md to disk (interactive), or print to stdout if piped
   --help       Show this help and exit
 
 Config file (.ctx-audit.json):
@@ -438,12 +474,19 @@ Companion tools:
 Token estimates use ~3.5 chars/token heuristic (directionally useful, not exact).`);
 }
 
-// ---- --init scaffolding ----
-function printInit() {
-  // Detect project info
-  const detected = { buildCmd: null, testCmd: null, lintCmd: null, language: null, entrypoint: null };
+// ---- sync prompt (TTY only) ----
+function promptSync(question) {
+  process.stdout.write(question);
+  const buf = Buffer.alloc(256);
+  let n = 0;
+  try { n = readSync(0, buf, 0, buf.length, null); } catch {}
+  return buf.toString('utf8', 0, n).trim();
+}
 
-  // package.json
+// ---- build init template content ----
+function buildInitContent() {
+  const detected = { buildCmd: null, testCmd: null, lintCmd: null, language: null };
+
   if (existsSync("package.json")) {
     try {
       const pkg = JSON.parse(readFileSync("package.json", "utf8"));
@@ -453,11 +496,9 @@ function printInit() {
         if (pkg.scripts.test) detected.testCmd = `npm test`;
         if (pkg.scripts.lint) detected.lintCmd = `npm run lint`;
       }
-      if (pkg.main) detected.entrypoint = pkg.main;
     } catch { /* ignore */ }
   }
 
-  // pyproject.toml
   if (!detected.language && existsSync("pyproject.toml")) {
     detected.language = "Python";
     if (existsSync("Makefile")) {
@@ -470,7 +511,6 @@ function printInit() {
     if (!detected.testCmd) detected.testCmd = "pytest";
   }
 
-  // Cargo.toml
   if (!detected.language && existsSync("Cargo.toml")) {
     detected.language = "Rust";
     detected.buildCmd = "cargo build";
@@ -478,7 +518,6 @@ function printInit() {
     detected.lintCmd = "cargo clippy";
   }
 
-  // Makefile fallback
   if (!detected.language && existsSync("Makefile")) {
     try {
       const makefile = readFileSync("Makefile", "utf8");
@@ -491,9 +530,9 @@ function printInit() {
 
   const sha = sh("git rev-parse HEAD") || "<TODO: insert current HEAD sha>";
   const lang = detected.language || "<TODO: language>";
+  const today = new Date().toISOString().slice(0, 10);
 
-  console.log(`# ======================== AGENTS.md ========================
----
+  const agentsMd = `---
 last_synced_commit: ${sha}
 ---
 
@@ -503,39 +542,281 @@ last_synced_commit: ${sha}
 ${lang}
 
 ## Commands
-${detected.buildCmd ? `- Build: \`${detected.buildCmd}\`` : "- Build: \`TODO\`"}
-${detected.testCmd ? `- Test: \`${detected.testCmd}\`` : "- Test: \`TODO\`"}
-${detected.lintCmd ? `- Lint: \`${detected.lintCmd}\`` : "- Lint: \`TODO\`"}
+${detected.buildCmd ? `- Build: \`${detected.buildCmd}\`` : "- Build: `TODO`"}
+${detected.testCmd ? `- Test: \`${detected.testCmd}\`` : "- Test: `TODO`"}
+${detected.lintCmd ? `- Lint: \`${detected.lintCmd}\`` : "- Lint: `TODO`"}
 
 ## File layout
 TODO: describe key directories and what goes where.
 
 ## Hard constraints
 TODO: list things agents must never do (e.g., "never commit .env files").
+`;
 
-# ======================== memory.md ========================
----
+  const memoryMd = `---
 last_synced_commit: ${sha}
 ---
 
 # Decision log
 
-## $(date) — Initial setup
+## ${today} — Initial setup
 - **Context:** Project initialized with ctx-audit.
 - **Decision:** TODO: record your first architectural or process decision here.
 - **Why:** TODO
 - **Revisit if:** TODO
+`;
+
+  return { agentsMd, memoryMd };
+}
+
+// ---- --init scaffolding ----
+function printInit() {
+  const { agentsMd, memoryMd } = buildInitContent();
+
+  if (process.stdout.isTTY) {
+    // Interactive: write files to disk
+    console.log(`${c.bold}${c.cyan}ctx-audit --init${c.reset}  scaffolding context files\n`);
+
+    if (existsSync("AGENTS.md")) {
+      const answer = promptSync(`${c.yellow}AGENTS.md already exists. Overwrite? [y/N] ${c.reset}`);
+      if (answer.toLowerCase() === 'y') {
+        writeFileSync("AGENTS.md", agentsMd, "utf8");
+        console.log(`${c.green}✓${c.reset} AGENTS.md written`);
+      } else {
+        console.log(`${c.dim}↳ AGENTS.md skipped${c.reset}`);
+      }
+    } else {
+      writeFileSync("AGENTS.md", agentsMd, "utf8");
+      console.log(`${c.green}✓${c.reset} AGENTS.md written`);
+    }
+
+    if (existsSync("memory.md")) {
+      const answer = promptSync(`${c.yellow}memory.md already exists. Overwrite? [y/N] ${c.reset}`);
+      if (answer.toLowerCase() === 'y') {
+        writeFileSync("memory.md", memoryMd, "utf8");
+        console.log(`${c.green}✓${c.reset} memory.md written`);
+      } else {
+        console.log(`${c.dim}↳ memory.md skipped${c.reset}`);
+      }
+    } else {
+      writeFileSync("memory.md", memoryMd, "utf8");
+      console.log(`${c.green}✓${c.reset} memory.md written`);
+    }
+
+    console.log(`\nNext: fill in the TODOs, then run ${c.cyan}npx ctx-audit${c.reset} to verify.`);
+    console.log(`Tip: run ${c.cyan}/graphify${c.reset} or ${c.cyan}npx graphifyy${c.reset} to auto-generate .agent/graph.md`);
+  } else {
+    // Non-TTY: backward-compatible stdout output
+    console.log(`# ======================== AGENTS.md ========================
+${agentsMd.trimEnd()}
+
+# ======================== memory.md ========================
+${memoryMd.trimEnd()}
 
 # ======================== Tip ========================
 # To auto-generate .agent/graph.md (architecture map), run:
 #   /graphify    (in Claude Code)
 #   npx graphifyy   (standalone)
 # The graph gives agents a compressed, queryable map of your codebase.`);
+  }
+}
+
+// ---- install subcommand ----
+function runInstall() {
+  const skillSrc = join(__dirname, '..', 'skill', 'SKILL.md');
+  const skillDir = join(homedir(), '.claude', 'skills', 'ctx-audit');
+  const skillDest = join(skillDir, 'SKILL.md');
+  const claudeDir = join(homedir(), '.claude');
+  const claudeMdPath = join(claudeDir, 'CLAUDE.md');
+
+  if (!existsSync(skillSrc)) {
+    console.error(`${c.red}Error: skill/SKILL.md not found at ${skillSrc}${c.reset}`);
+    console.error(`Make sure ctx-audit is installed via npm (not just cloned).`);
+    process.exit(1);
+  }
+
+  // 1. Copy skill to ~/.claude/skills/ctx-audit/SKILL.md
+  mkdirSync(skillDir, { recursive: true });
+  copyFileSync(skillSrc, skillDest);
+  console.log(`${c.green}✓${c.reset} Skill copied to ${skillDest}`);
+
+  // 2. Register in ~/.claude/CLAUDE.md (idempotent)
+  const block = `\n# ctx-audit\n- **ctx-audit** (\`~/.claude/skills/ctx-audit/SKILL.md\`) - audit context file freshness. Trigger: \`/ctx-audit\`\nWhen the user types \`/ctx-audit\`, invoke the Skill tool with \`skill: "ctx-audit"\` before doing anything else.\n`;
+
+  let existing = '';
+  if (existsSync(claudeMdPath)) {
+    existing = readFileSync(claudeMdPath, 'utf8');
+  }
+
+  if (existing.includes('ctx-audit')) {
+    console.log(`${c.yellow}↳${c.reset}  ${claudeMdPath} already contains ctx-audit — skipped`);
+  } else {
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(claudeMdPath, existing + block, 'utf8');
+    console.log(`${c.green}✓${c.reset} Registered in ${claudeMdPath}`);
+  }
+
+  // 3. Onboarding summary
+  console.log(`\n${c.bold}${c.green}ctx-audit installed!${c.reset}\n`);
+  console.log(`Next steps:`);
+  console.log(`  ${c.cyan}ctx-audit hook install${c.reset}    wire up git pre-push hook`);
+  console.log(`  ${c.cyan}ctx-audit claude install${c.reset}  add ctx-audit to project CLAUDE.md`);
+  console.log(`  ${c.cyan}npx ctx-audit${c.reset}             run an audit now`);
+  console.log(`  ${c.cyan}/ctx-audit${c.reset}                trigger from Claude Code`);
+}
+
+// ---- hook subcommand ----
+function runHook(subArgs) {
+  const action = subArgs[0] || 'install';
+
+  if (!['install', 'uninstall', 'status'].includes(action)) {
+    console.error(`Unknown hook action: ${action}. Use: install, uninstall, status`);
+    process.exit(1);
+  }
+
+  if (!existsSync('.git')) {
+    console.error(`${c.red}Error: No .git directory found. Run from the repo root.${c.reset}`);
+    process.exit(1);
+  }
+
+  const hooksDir = join('.git', 'hooks');
+  const hookPath = join(hooksDir, 'pre-push');
+  const hookMark = '# ctx-audit-hook';
+  const hookSnippet = `${hookMark}\nnpx ctx-audit --strict || exit 1`;
+
+  if (action === 'status') {
+    if (existsSync(hookPath)) {
+      const content = readFileSync(hookPath, 'utf8');
+      if (content.includes(hookMark)) {
+        console.log(`${c.green}✓${c.reset} ctx-audit hook is installed (${hookPath})`);
+      } else {
+        console.log(`${c.yellow}~${c.reset} pre-push hook exists but does not contain ctx-audit`);
+      }
+    } else {
+      console.log(`${c.dim}○ No pre-push hook found${c.reset}`);
+    }
+    return;
+  }
+
+  if (action === 'uninstall') {
+    if (!existsSync(hookPath)) {
+      console.log(`${c.dim}○ No pre-push hook to remove${c.reset}`);
+      return;
+    }
+    const content = readFileSync(hookPath, 'utf8');
+    if (!content.includes(hookMark)) {
+      console.log(`${c.yellow}↳${c.reset}  Hook does not contain ctx-audit marker — nothing removed`);
+      return;
+    }
+    const newContent = content.replace(`\n\n${hookSnippet}\n`, '').replace(`\n${hookSnippet}\n`, '').replace(hookSnippet, '');
+    writeFileSync(hookPath, newContent, 'utf8');
+    console.log(`${c.green}✓${c.reset} ctx-audit hook removed from ${hookPath}`);
+    return;
+  }
+
+  // action === 'install'
+  if (existsSync(hookPath)) {
+    const content = readFileSync(hookPath, 'utf8');
+    if (content.includes(hookMark)) {
+      console.log(`${c.yellow}↳${c.reset}  Hook already installed — skipped`);
+      return;
+    }
+    const appended = content.trimEnd() + '\n\n' + hookSnippet + '\n';
+    writeFileSync(hookPath, appended, 'utf8');
+  } else {
+    mkdirSync(hooksDir, { recursive: true });
+    writeFileSync(hookPath, `#!/bin/sh\n${hookSnippet}\n`, 'utf8');
+  }
+  chmodSync(hookPath, 0o755);
+  console.log(`${c.green}✓${c.reset} Hook written to ${hookPath}`);
+  console.log(`  ${c.gray}Runs npx ctx-audit --strict on every git push${c.reset}`);
+}
+
+// ---- claude subcommand ----
+function runClaude(subArgs) {
+  const action = subArgs[0] || 'install';
+
+  if (!['install', 'uninstall'].includes(action)) {
+    console.error(`Unknown claude action: ${action}. Use: install, uninstall`);
+    process.exit(1);
+  }
+
+  const claudeMdPath = 'CLAUDE.md';
+  const sectionMark = '<!-- ctx-audit -->';
+  const section = `\n${sectionMark}\n## ctx-audit\n\nRun \`npx ctx-audit\` at the start of any non-trivial session in this repository.\nUpdate context files (AGENTS.md, memory.md) after modifying what they describe, then bump their \`last_synced_commit\` to current HEAD.\n`;
+
+  if (action === 'uninstall') {
+    if (!existsSync(claudeMdPath)) {
+      console.log(`${c.dim}○ No CLAUDE.md found${c.reset}`);
+      return;
+    }
+    const content = readFileSync(claudeMdPath, 'utf8');
+    if (!content.includes(sectionMark)) {
+      console.log(`${c.yellow}↳${c.reset}  CLAUDE.md does not contain ctx-audit section — nothing removed`);
+      return;
+    }
+    // Remove from the marker through to the next heading or end of file
+    const newContent = content
+      .replace(/\n?<!-- ctx-audit -->\n## ctx-audit\n[\s\S]*?(?=\n##? |\n# |$)/, '')
+      .trimEnd() + '\n';
+    writeFileSync(claudeMdPath, newContent, 'utf8');
+    console.log(`${c.green}✓${c.reset} ctx-audit section removed from CLAUDE.md`);
+    return;
+  }
+
+  // action === 'install'
+  let existing = '';
+  if (existsSync(claudeMdPath)) {
+    existing = readFileSync(claudeMdPath, 'utf8');
+  }
+
+  if (existing.includes(sectionMark)) {
+    console.log(`${c.yellow}↳${c.reset}  CLAUDE.md already contains ctx-audit section — skipped`);
+    return;
+  }
+
+  writeFileSync(claudeMdPath, existing + section, 'utf8');
+  console.log(`${c.green}✓${c.reset} Added ctx-audit section to CLAUDE.md`);
+  console.log(`  ${c.gray}Agents will run npx ctx-audit at session start${c.reset}`);
+}
+
+// ---- benchmark subcommand ----
+function runBenchmark() {
+  const config = resolveConfig();
+  const report = buildReport(config);
+
+  console.log(`\n${c.bold}${c.cyan}Token Savings Benchmark${c.reset}`);
+  console.log(c.dim + "=".repeat(40) + c.reset);
+
+  if (!report.baselineTokens) {
+    console.log(`${c.yellow}No source directories found for baseline estimation.${c.reset}`);
+    console.log(`Add sourceDirs to .ctx-audit.json or create src/, lib/, or app/ directories.`);
+    return;
+  }
+
+  console.log(`${c.bold}Curated context:${c.reset}  ~${report.curatedTokens} tokens`);
+  console.log(`${c.bold}Baseline (raw):${c.reset}    ~${report.baselineTokens} tokens`);
+
+  if (report.estimatedSavingsPct !== null) {
+    console.log(`${c.bold}Savings:${c.reset}           ${c.green}~${report.estimatedSavingsPct}%${c.reset}`);
+  }
+  if (report.savingsRatio !== null) {
+    console.log(`${c.bold}Ratio:${c.reset}             ${c.cyan}${report.savingsRatio}x smaller${c.reset}`);
+  }
+
+  console.log(c.dim + "-".repeat(40) + c.reset);
+  console.log(`${c.gray}Context files:${c.reset}`);
+  for (const r of report.checks) {
+    if (r.exists) {
+      console.log(`  ${c.gray}${r.file}${c.reset}  ~${r.tokens} tok`);
+    }
+  }
 }
 
 // ---- main ----
 function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  const args = parseArgs(argv);
 
   // --ci is an alias for --strict --json
   if (args.ci) {
@@ -547,6 +828,12 @@ function main() {
     printHelp();
     process.exit(0);
   }
+
+  // Subcommand dispatch
+  if (args.sub === 'install')   { runInstall();           process.exit(0); }
+  if (args.sub === 'hook')      { runHook(args.subArgs);  process.exit(0); }
+  if (args.sub === 'claude')    { runClaude(args.subArgs); process.exit(0); }
+  if (args.sub === 'benchmark') { runBenchmark();         process.exit(0); }
 
   if (args.init) {
     printInit();
