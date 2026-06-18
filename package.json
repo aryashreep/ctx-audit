@@ -1,10 +1,10 @@
 {
   "name": "ctx-audit",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Repository memory governance for AI coding agents — keep AGENTS.md, memory.md, and .agent/graph.md fresh, trusted, and CI-enforced",
   "type": "module",
   "bin": {
-    "ctx-audit": "./scripts/audit.mjs"
+    "ctx-audit": "scripts/audit.mjs"
   },
   "files": [
     "scripts/audit.mjs",
@@ -31,6 +31,6 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/aryashreep/ctx-audit.git"
+    "url": "git+https://github.com/aryashreep/ctx-audit.git"
   }
 }
