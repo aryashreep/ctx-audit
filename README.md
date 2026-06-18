@@ -7,10 +7,64 @@
 
 ![ctx-audit demo](docs/demo.png)
 
-Checks whether a repo's persistent context files (`AGENTS.md`, `memory.md`,
-`.agent/graph.md`) exist and are current — and estimates how many tokens
-they save an AI agent vs. re-discovering everything from raw source each
-session. Zero dependencies, single script, three install paths.
+ctx-audit is a repository memory governance tool for engineering teams working with AI coding agents.
+
+It verifies that project context files (`AGENTS.md`, `memory.md`, `.agent/graph.md`) exist, stay aligned with the codebase, and remain a trustworthy source of truth — so agents can rely on curated knowledge instead of re-discovering architecture, conventions, and decisions from raw source on every session.
+
+Zero dependencies, single script, three install paths.
+
+## Why ctx-audit?
+
+- **Decisions live in heads, not files.** Architectural choices, past experiments, and settled debates are invisible to agents unless they're written down and kept current.
+- **Conventions are scattered.** Build rules, lint constraints, and naming patterns are buried in commits, PRs, and Slack threads — not in a place agents can read.
+- **Agents re-scan everything.** Without fresh context files, every session starts from zero: the agent reads hundreds of source files to reconstruct what your team already knows.
+- **Stale docs are worse than none.** An agent that trusts an outdated `AGENTS.md` will make wrong assumptions with false confidence.
+
+## Before / After
+
+| Without context files | With fresh context files |
+|---|---|
+| Agent reads hundreds of source files to understand structure | Agent reads curated `AGENTS.md` in seconds |
+| Conventions must be re-derived from code patterns | Hard constraints and conventions are explicit and verified |
+| Every session starts from zero | Decisions and rationale persist across sessions |
+| Agent may contradict past decisions | `memory.md` provides a trusted decision log |
+
+## What ctx-audit checks
+
+### Repository Memory Health
+
+Verifies required context files exist and follow the `last_synced_commit` frontmatter convention that pins each file to the commit it was last verified against.
+
+### Context Freshness
+
+Counts source commits since each file was last synced. Reports graduated staleness levels (`FRESH`, `STALE?`, `STALE!`, `STALE`) so you know exactly how much to trust each file before handing it to an agent.
+
+Also detects **stale-bump**: a SHA update with no real content change — and **dead references**: paths mentioned in context files that no longer exist in the repo.
+
+### Context Efficiency
+
+Estimates how compact your curated context is compared to an agent reading raw source. Uses a ~3.5 chars/token heuristic — fast, dependency-free, and directionally useful, but not exact. All token counts in the output are labeled `est.` to make this clear. The "baseline" estimate sums tracked source files up to a cap, which is a proxy for "an agent reading everything," not a guarantee of what any particular agent would actually do.
+
+The savings ratio (e.g., `12.0x smaller`) shows how much more compact the curated context is compared to reading raw source.
+
+## Supported Agent Ecosystem
+
+| Agent | How to integrate |
+|---|---|
+| Claude Code | `npx ctx-audit install` — registers `/ctx-audit` skill and session trigger |
+| OpenAI Codex | Add `npx ctx-audit --strict` to your CI workflow |
+| Cursor | Add ctx-audit to your `.cursorrules` session preamble |
+| Gemini CLI | Reference `AGENTS.md` in your system prompt |
+| Windsurf | Add ctx-audit to Windsurf's pre-session hooks |
+| Aider | Pass `--read AGENTS.md` after verifying freshness |
+
+## Philosophy
+
+- Context files should be **explicit** — written down, not inferred from code patterns.
+- Context files should be **version-controlled** — treated as first-class engineering artifacts alongside source.
+- Context files should be **reviewable** — changes go through the same PR process as code.
+- Context files should be **auditable** — every file carries the commit it was last verified against.
+- Context files should be **trustworthy** — agents that trust their context are faster, more accurate, and less likely to contradict past decisions.
 
 ## Getting started in 60 seconds
 
@@ -238,13 +292,3 @@ auto-generate the `.agent/graph.md` architecture map by building a knowledge
 graph from your codebase. When ctx-audit reports high baseline token costs or a
 missing graph file, running Graphify is the fastest way to close the gap.
 
-## Token estimate caveat
-
-The script uses a ~3.5 chars/token heuristic — fast, dependency-free, and
-directionally useful, but not exact. All token counts in the output are labeled
-`est.` to make this clear. The "baseline" estimate (cost without context files)
-sums tracked source files up to a cap, which is a proxy for "an agent reading
-everything," not a guarantee of what any particular agent would actually do.
-
-The savings ratio (e.g., `12.0x smaller`) shows how much more compact the
-curated context is compared to reading raw source.
