@@ -55,7 +55,6 @@ const c = {
 const DEFAULT_FILES = [
   { id: "agents", file: "AGENTS.md", label: "Agent instructions", maxTokens: 1500, required: true },
   { id: "memory", file: "memory.md", label: "Decision / memory log", maxTokens: 2500, required: true },
-  { id: "graph", file: ".agent/graph.md", label: "Architecture map", maxTokens: 2000, required: false },
 ];
 
 const DEFAULT_SOURCE_DIRS = ["src", "lib", "app"];
