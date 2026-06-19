@@ -8,7 +8,7 @@
   },
   "files": [
     "scripts/audit.mjs",
-    "skill/SKILL.md",
+    "SKILL.md",
     "README.md"
   ],
   "engines": {

@@ -77,12 +77,14 @@ Flags:
 - `--json` — machine-readable output (use this if you're going to act on the result programmatically).
 - `--strict` — exit code 1 if anything is missing or stale.
 - `--ci` — alias for `--strict --json`.
-- `--init` — write AGENTS.md and memory.md to disk (interactive), or print templates to stdout if piped.
 - `--help` — show usage and exit.
 
 ## Subcommands
 
 ```bash
+# Scaffold AGENTS.md + memory.md (interactive — writes files directly to repo root)
+npx ctx-audit init
+
 # One-command install: copies skill to ~/.claude/skills/, registers in CLAUDE.md
 npx ctx-audit install
 
@@ -107,7 +109,7 @@ npx ctx-audit benchmark
 | **STALE?** | Approaching threshold (possibly stale) | Mild caution — spot-check critical claims before relying on them |
 | **STALE!** | Past threshold, counts as failure | Treat claims as unverified; spot-check against actual code; update after session |
 | **STALE** | Significantly behind, counts as failure | Same as STALE! but more urgent; update immediately after session |
-| **MISSING** (required) | File doesn't exist | Run `npx ctx-audit --init`; don't proceed as if convention is in place |
+| **MISSING** (required) | File doesn't exist | Run `npx ctx-audit init`; don't proceed as if convention is in place |
 | **absent** (optional) | Optional file not present | Acceptable; consider running `/graphify` to generate graph.md |
 | **over budget** | Token count exceeds `maxTokens` | File is bloated — trim it; reading it may cost more than it saves |
 | **dead reference** | Backtick path or `dir/file.ext` in file doesn't exist on disk | Update the reference; file documents outdated structure |
@@ -116,7 +118,7 @@ npx ctx-audit benchmark
 ## Interpreting results
 
 - **MISSING** (required file): don't proceed as if the convention is in place.
-  Offer to scaffold a starter file (run `npx ctx-audit --init`) rather than
+  Offer to scaffold a starter file (run `npx ctx-audit init`) rather than
   working without one or silently doing the old "explore everything manually"
   approach.
 - **FRESH**: the file is up to date. Read it instead of scanning raw source.
@@ -155,7 +157,7 @@ npx ctx-audit --json | jq '.checks[] | {file, stalenessLevel, stale}'
 npx ctx-audit install        # copies skill, registers in CLAUDE.md
 npx ctx-audit hook install   # adds pre-push guard
 npx ctx-audit claude install # adds note to project CLAUDE.md
-npx ctx-audit --init         # scaffolds AGENTS.md + memory.md
+npx ctx-audit init           # scaffolds AGENTS.md + memory.md
 ```
 
 **Check only specific subsystem staleness (via frontmatter):**
@@ -201,8 +203,9 @@ those paths, instead of all source directories.
 
 ## If required files are missing — scaffold them
 
-Run `npx ctx-audit --init` to generate templates. In a TTY it writes files
-directly; when piped, it prints to stdout for redirect.
+Run `npx ctx-audit init` to generate templates. In a TTY it writes files
+directly to the repository root; when piped, it prints to stdout for redirect.
+The legacy `--init` flag is still supported as a backward-compatible alias.
 
 **AGENTS.md** — stable project conventions: build/test/lint commands, file
 layout rules, things the agent must never do. Should change rarely.

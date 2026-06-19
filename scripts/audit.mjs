@@ -21,13 +21,22 @@ import {
   existsSync, readFileSync, mkdirSync, copyFileSync,
   writeFileSync, chmodSync, readSync,
 } from "node:fs";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { join, basename, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// ---- resolve git root directory ----
+let gitRoot = process.cwd();
+try {
+  const root = execFileSync("git", ["rev-parse", "--show-toplevel"], { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+  if (root) gitRoot = root;
+} catch {
+  // Not a git repository, fallback to process.cwd()
+}
 
 // ---- color system ----
 const USE_COLOR = process.stdout.isTTY && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
@@ -54,7 +63,7 @@ const DEFAULT_STALE_THRESHOLD = 5;
 const DEFAULT_BASELINE_FILE_CAP = 200;
 
 // ---- subcommand set ----
-const SUBCOMMANDS = new Set(['install', 'hook', 'claude', 'benchmark']);
+const SUBCOMMANDS = new Set(['install', 'hook', 'claude', 'benchmark', 'init']);
 
 // ---- argument parsing ----
 function parseArgs(argv) {
@@ -66,7 +75,7 @@ function parseArgs(argv) {
     json: argv.includes("--json"),
     strict: argv.includes("--strict"),
     ci: argv.includes("--ci"),
-    init: argv.includes("--init"),
+    init: argv.includes("--init") || sub === "init",
     help: argv.includes("--help"),
   };
 }
@@ -74,11 +83,14 @@ function parseArgs(argv) {
 // ---- config resolution ----
 function resolveConfig(overrides = {}) {
   let fileConfig = {};
-  try {
-    const raw = readFileSync(".ctx-audit.json", "utf8");
-    fileConfig = JSON.parse(raw);
-  } catch {
-    // no config file or invalid JSON — use defaults
+  const configPath = join(gitRoot, ".ctx-audit.json");
+  if (existsSync(configPath)) {
+    try {
+      const raw = readFileSync(configPath, "utf8");
+      fileConfig = JSON.parse(raw);
+    } catch (err) {
+      console.warn(`${c.yellow}Warning: Failed to parse .ctx-audit.json (${err.message}). Falling back to default settings.${c.reset}`);
+    }
   }
 
   const files = overrides.files || fileConfig.files || DEFAULT_FILES;
@@ -100,10 +112,14 @@ function resolveConfig(overrides = {}) {
 
 // ---- auto-detect source dirs ----
 function autoDetectSourceDirs() {
-  const skipDirs = new Set(["node_modules", "dist", "build", "coverage", ".git", ".github", ".vscode", ".idea"]);
+  const skipDirs = new Set([
+    "node_modules", "dist", "build", "coverage", ".git", ".github",
+    ".vscode", ".idea", "tests", "test", "spec", "docs", "scripts",
+    "public", "vendor", "bin", "assets", "tmp", "temp"
+  ]);
 
-  const tree = sh("git ls-files");
-  if (!tree) return DEFAULT_SOURCE_DIRS.filter((d) => existsSync(d));
+  const tree = runGit(["ls-files"]);
+  if (!tree) return DEFAULT_SOURCE_DIRS.filter((d) => existsSync(join(gitRoot, d)));
 
   const counts = {};
   for (const f of tree.split("\n").filter(Boolean)) {
@@ -120,19 +136,24 @@ function autoDetectSourceDirs() {
     .map(([dir]) => dir);
 
   if (sorted.length === 0) {
-    return DEFAULT_SOURCE_DIRS.filter((d) => existsSync(d));
+    return DEFAULT_SOURCE_DIRS.filter((d) => existsSync(join(gitRoot, d)));
   }
 
   return sorted;
 }
 
-// ---- shell helper ----
-function sh(cmd) {
+// ---- secure git helper ----
+function runGit(args) {
   try {
-    return execSync(cmd, { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    return execFileSync("git", args, { cwd: gitRoot, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
   } catch {
     return null;
   }
+}
+
+// ---- source dirs filtering ----
+function existingSourceDirs(config) {
+  return config.sourceDirs.filter((d) => existsSync(join(gitRoot, d)));
 }
 
 // ---- token estimation ----
@@ -159,15 +180,10 @@ function stripFrontmatter(text) {
   return text.replace(/^---\n[\s\S]*?\n---\n?/, "");
 }
 
-// ---- source dirs filtering ----
-function existingSourceDirs(config) {
-  return config.sourceDirs.filter((d) => existsSync(d));
-}
-
 // ---- commit counting ----
 function commitsSince(sha, dirs) {
   if (!sha || dirs.length === 0) return null;
-  const out = sh(`git rev-list --count ${sha}..HEAD -- ${dirs.join(" ")}`);
+  const out = runGit(["rev-list", "--count", `${sha}..HEAD`, "--", ...dirs]);
   if (out === null || out === "") return null;
   const n = parseInt(out, 10);
   return Number.isNaN(n) ? null : n;
@@ -203,23 +219,30 @@ function statusBadge(r) {
 // ---- dead reference detection ----
 function detectDeadReferences(text) {
   const body = stripFrontmatter(text);
+  // Strip fenced code blocks (triple backticks) to avoid false positives inside mock snippets
+  const cleanBody = body.replace(/```[\s\S]*?```/g, "");
   const warnings = [];
+  const skipSubstrings = ["github.com", "npmjs.com", "unpkg.com", "raw.githubusercontent.com"];
 
   // Match backtick-quoted paths: `some/path.ext` or `dir/file`
-  const backtickPaths = body.matchAll(/`([a-zA-Z0-9_./-]+\/[a-zA-Z0-9_./-]+)`/g);
+  const backtickPaths = cleanBody.matchAll(/`([a-zA-Z0-9_./-]+\/[a-zA-Z0-9_./-]+)`/g);
   for (const m of backtickPaths) {
     const p = m[1];
-    if (!existsSync(p)) {
+    if (skipSubstrings.some((sub) => p.includes(sub))) continue;
+    const absPath = join(gitRoot, p);
+    if (!existsSync(absPath)) {
       warnings.push(`dead reference: \`${p}\` not found`);
     }
   }
 
   // Match bare dir/file.ext patterns (must have an extension)
-  const barePaths = body.matchAll(/(?<![`\/])(?:^|[\s(])([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.\/-]+\.[a-zA-Z]{1,10})(?=[)\s,;:]|$)/gm);
+  const barePaths = cleanBody.matchAll(/(?<![`\/])(?:^|[\s(])([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.\/-]+\.[a-zA-Z]{1,10})(?=[)\s,;:]|$)/gm);
   for (const m of barePaths) {
     const p = m[1];
     if (p.includes("://") || p.startsWith("http")) continue;
-    if (!existsSync(p)) {
+    if (skipSubstrings.some((sub) => p.includes(sub))) continue;
+    const absPath = join(gitRoot, p);
+    if (!existsSync(absPath)) {
       warnings.push(`dead reference: ${p} not found`);
     }
   }
@@ -231,12 +254,12 @@ function detectDeadReferences(text) {
 function detectStaleBump(filePath, sha) {
   if (!sha) return null;
 
-  const oldContent = sh(`git show ${sha}:${filePath}`);
+  const oldContent = runGit(["show", `${sha}:${filePath}`]);
   if (oldContent === null) return null;
 
   let currentContent;
   try {
-    currentContent = readFileSync(filePath, "utf8");
+    currentContent = readFileSync(join(gitRoot, filePath), "utf8");
   } catch {
     return null;
   }
@@ -263,13 +286,15 @@ function checkFile(entry, config) {
     warnings: [],
   };
 
-  if (!existsSync(entry.file)) {
+  const absPath = join(gitRoot, entry.file);
+
+  if (!existsSync(absPath)) {
     result.issues.push(entry.required ? "missing (required)" : "missing (optional)");
     return result;
   }
 
   result.exists = true;
-  const text = readFileSync(entry.file, "utf8");
+  const text = readFileSync(absPath, "utf8");
   result.tokens = estimateTokens(text);
 
   if (result.tokens > entry.maxTokens) {
@@ -323,14 +348,14 @@ function estimateBaselineWithoutContext(config) {
   const dirs = existingSourceDirs(config);
   if (dirs.length === 0) return null;
 
-  const tree = sh(`git ls-files ${dirs.join(" ")}`);
+  const tree = runGit(["ls-files", "--", ...dirs]);
   if (!tree) return null;
 
   const files = tree.split("\n").filter(Boolean).slice(0, config.baselineFileCap);
   let total = 0;
   for (const f of files) {
     try {
-      total += estimateTokens(readFileSync(f, "utf8"));
+      total += estimateTokens(readFileSync(join(gitRoot, f), "utf8"));
     } catch {
       // unreadable/binary file, skip
     }
@@ -353,7 +378,7 @@ function buildReport(config) {
 
   const graphCheck = checks.find((c) => c.id === "graph");
   const graphMissing = graphCheck && !graphCheck.exists;
-  const graphifyExists = existsSync("graphify-out/graph.json");
+  const graphifyExists = existsSync(join(gitRoot, "graphify-out/graph.json"));
 
   if (!graphifyExists) {
     if (graphMissing) {
@@ -427,6 +452,7 @@ Usage:
   npx ctx-audit [subcommand] [flags]
 
 Subcommands:
+  init                 Write AGENTS.md + memory.md to disk (interactive), or print to stdout if piped
   install              Copy skill to ~/.claude/skills/, register in CLAUDE.md
   hook install         Write pre-push git hook (--strict audit on every push)
   hook uninstall       Remove ctx-audit from pre-push hook
@@ -439,7 +465,6 @@ Flags:
   --json       Machine-readable JSON output
   --strict     Exit 1 on any failure (missing required file or stale file)
   --ci         Alias for --strict --json
-  --init       Write AGENTS.md + memory.md to disk (interactive), or print to stdout if piped
   --help       Show this help and exit
 
 Config file (.ctx-audit.json):
@@ -487,9 +512,9 @@ function promptSync(question) {
 function buildInitContent() {
   const detected = { buildCmd: null, testCmd: null, lintCmd: null, language: null };
 
-  if (existsSync("package.json")) {
+  if (existsSync(join(gitRoot, "package.json"))) {
     try {
-      const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+      const pkg = JSON.parse(readFileSync(join(gitRoot, "package.json"), "utf8"));
       detected.language = "Node.js";
       if (pkg.scripts) {
         if (pkg.scripts.build) detected.buildCmd = `npm run build`;
@@ -499,11 +524,11 @@ function buildInitContent() {
     } catch { /* ignore */ }
   }
 
-  if (!detected.language && existsSync("pyproject.toml")) {
+  if (!detected.language && existsSync(join(gitRoot, "pyproject.toml"))) {
     detected.language = "Python";
-    if (existsSync("Makefile")) {
+    if (existsSync(join(gitRoot, "Makefile"))) {
       try {
-        const makefile = readFileSync("Makefile", "utf8");
+        const makefile = readFileSync(join(gitRoot, "Makefile"), "utf8");
         if (makefile.includes("pytest")) detected.testCmd = "make test";
         if (makefile.includes("ruff") || makefile.includes("flake8")) detected.lintCmd = "make lint";
       } catch { /* ignore */ }
@@ -511,16 +536,16 @@ function buildInitContent() {
     if (!detected.testCmd) detected.testCmd = "pytest";
   }
 
-  if (!detected.language && existsSync("Cargo.toml")) {
+  if (!detected.language && existsSync(join(gitRoot, "Cargo.toml"))) {
     detected.language = "Rust";
     detected.buildCmd = "cargo build";
     detected.testCmd = "cargo test";
     detected.lintCmd = "cargo clippy";
   }
 
-  if (!detected.language && existsSync("Makefile")) {
+  if (!detected.language && existsSync(join(gitRoot, "Makefile"))) {
     try {
-      const makefile = readFileSync("Makefile", "utf8");
+      const makefile = readFileSync(join(gitRoot, "Makefile"), "utf8");
       const targets = [...makefile.matchAll(/^([a-zA-Z_-]+):/gm)].map((m) => m[1]);
       if (targets.includes("build")) detected.buildCmd = "make build";
       if (targets.includes("test")) detected.testCmd = "make test";
@@ -528,7 +553,7 @@ function buildInitContent() {
     } catch { /* ignore */ }
   }
 
-  const sha = sh("git rev-parse HEAD") || "<TODO: insert current HEAD sha>";
+  const sha = runGit(["rev-parse", "HEAD"]) || "<TODO: insert current HEAD sha>";
   const lang = detected.language || "<TODO: language>";
   const today = new Date().toISOString().slice(0, 10);
 
@@ -569,37 +594,39 @@ last_synced_commit: ${sha}
   return { agentsMd, memoryMd };
 }
 
-// ---- --init scaffolding ----
+// ---- init scaffolding ----
 function printInit() {
   const { agentsMd, memoryMd } = buildInitContent();
+  const agentsPath = join(gitRoot, "AGENTS.md");
+  const memoryPath = join(gitRoot, "memory.md");
 
   if (process.stdout.isTTY) {
     // Interactive: write files to disk
-    console.log(`${c.bold}${c.cyan}ctx-audit --init${c.reset}  scaffolding context files\n`);
+    console.log(`${c.bold}${c.cyan}ctx-audit init${c.reset}  scaffolding context files\n`);
 
-    if (existsSync("AGENTS.md")) {
-      const answer = promptSync(`${c.yellow}AGENTS.md already exists. Overwrite? [y/N] ${c.reset}`);
+    if (existsSync(agentsPath)) {
+      const answer = promptSync(`${c.yellow}AGENTS.md already exists at ${agentsPath}. Overwrite? [y/N] ${c.reset}`);
       if (answer.toLowerCase() === 'y') {
-        writeFileSync("AGENTS.md", agentsMd, "utf8");
+        writeFileSync(agentsPath, agentsMd, "utf8");
         console.log(`${c.green}✓${c.reset} AGENTS.md written`);
       } else {
         console.log(`${c.dim}↳ AGENTS.md skipped${c.reset}`);
       }
     } else {
-      writeFileSync("AGENTS.md", agentsMd, "utf8");
+      writeFileSync(agentsPath, agentsMd, "utf8");
       console.log(`${c.green}✓${c.reset} AGENTS.md written`);
     }
 
-    if (existsSync("memory.md")) {
-      const answer = promptSync(`${c.yellow}memory.md already exists. Overwrite? [y/N] ${c.reset}`);
+    if (existsSync(memoryPath)) {
+      const answer = promptSync(`${c.yellow}memory.md already exists at ${memoryPath}. Overwrite? [y/N] ${c.reset}`);
       if (answer.toLowerCase() === 'y') {
-        writeFileSync("memory.md", memoryMd, "utf8");
+        writeFileSync(memoryPath, memoryMd, "utf8");
         console.log(`${c.green}✓${c.reset} memory.md written`);
       } else {
         console.log(`${c.dim}↳ memory.md skipped${c.reset}`);
       }
     } else {
-      writeFileSync("memory.md", memoryMd, "utf8");
+      writeFileSync(memoryPath, memoryMd, "utf8");
       console.log(`${c.green}✓${c.reset} memory.md written`);
     }
 
@@ -623,14 +650,14 @@ ${memoryMd.trimEnd()}
 
 // ---- install subcommand ----
 function runInstall() {
-  const skillSrc = join(__dirname, '..', 'skill', 'SKILL.md');
+  const skillSrc = join(__dirname, '..', 'SKILL.md');
   const skillDir = join(homedir(), '.claude', 'skills', 'ctx-audit');
   const skillDest = join(skillDir, 'SKILL.md');
   const claudeDir = join(homedir(), '.claude');
   const claudeMdPath = join(claudeDir, 'CLAUDE.md');
 
   if (!existsSync(skillSrc)) {
-    console.error(`${c.red}Error: skill/SKILL.md not found at ${skillSrc}${c.reset}`);
+    console.error(`${c.red}Error: SKILL.md not found at ${skillSrc}${c.reset}`);
     console.error(`Make sure ctx-audit is installed via npm (not just cloned).`);
     process.exit(1);
   }
@@ -674,12 +701,12 @@ function runHook(subArgs) {
     process.exit(1);
   }
 
-  if (!existsSync('.git')) {
+  if (!existsSync(join(gitRoot, '.git'))) {
     console.error(`${c.red}Error: No .git directory found. Run from the repo root.${c.reset}`);
     process.exit(1);
   }
 
-  const hooksDir = join('.git', 'hooks');
+  const hooksDir = join(gitRoot, '.git', 'hooks');
   const hookPath = join(hooksDir, 'pre-push');
   const hookMark = '# ctx-audit-hook';
   const hookSnippet = `${hookMark}\nnpx ctx-audit --strict || exit 1`;
@@ -741,7 +768,7 @@ function runClaude(subArgs) {
     process.exit(1);
   }
 
-  const claudeMdPath = 'CLAUDE.md';
+  const claudeMdPath = join(gitRoot, 'CLAUDE.md');
   const sectionMark = '<!-- ctx-audit -->';
   const section = `\n${sectionMark}\n## ctx-audit\n\nRun \`npx ctx-audit\` at the start of any non-trivial session in this repository.\nUpdate context files (AGENTS.md, memory.md) after modifying what they describe, then bump their \`last_synced_commit\` to current HEAD.\n`;
 

@@ -78,8 +78,8 @@ npx ctx-audit hook install
 # 3. Tell agents in this repo to run it at session start
 npx ctx-audit claude install
 
-# 4. Scaffold AGENTS.md + memory.md (interactive — writes files directly)
-npx ctx-audit --init
+# 4. Scaffold AGENTS.md + memory.md (interactive — writes files to repo root)
+npx ctx-audit init
 
 # 5. Run your first audit
 npx ctx-audit
@@ -123,6 +123,7 @@ standalone workflow approach.
 
 | Command | What it does |
 |---|---|
+| `ctx-audit init` | Scaffold `AGENTS.md` + `memory.md` into repo root (interactive); or print templates to stdout when piped |
 | `ctx-audit install` | Copy skill to `~/.claude/skills/ctx-audit/`, register `/ctx-audit` trigger in `~/.claude/CLAUDE.md` |
 | `ctx-audit hook install` | Append `npx ctx-audit --strict` to `.git/hooks/pre-push` (idempotent) |
 | `ctx-audit hook uninstall` | Remove ctx-audit lines from pre-push hook |
@@ -138,8 +139,6 @@ npx ctx-audit              # human-readable report (colored in TTY)
 npx ctx-audit --json       # machine-readable JSON
 npx ctx-audit --strict     # exit 1 on any failure (for CI)
 npx ctx-audit --ci         # alias for --strict --json
-npx ctx-audit --init       # write AGENTS.md + memory.md to disk (interactive TTY)
-                           # or print templates to stdout when piped
 npx ctx-audit --help       # show usage and exit
 ```
 
@@ -150,7 +149,7 @@ ctx-audit/
 ├── package.json
 ├── action.yml              composite GitHub Action
 ├── scripts/audit.mjs       core logic (no dependencies, plain Node >=18)
-├── skill/SKILL.md          agent-invoked path (30+ trigger phrases)
+├── SKILL.md                agent-invoked path (30+ trigger phrases)
 ├── action/ctx-audit.yml     CI workflow template (copy into target repo)
 └── README.md
 ```
@@ -165,7 +164,7 @@ Once installed as a skill (`ctx-audit install`), you can trigger ctx-audit with 
 | "check context" / "is this repo set up for agents?" | Same — triggers the skill |
 | "get me up to speed on this repo" | Runs audit first, then reads the fresh files |
 | "is my memory.md stale?" | Runs audit, focuses on staleness |
-| "scaffold context files" / "init context" | Runs `--init` to write templates |
+| "scaffold context files" / "init context" | Runs `ctx-audit init` to write templates |
 | "benchmark token savings" | Runs `benchmark` subcommand |
 | "add ctx-audit to CI" | Suggests hook install + CI workflow |
 
@@ -178,7 +177,7 @@ and before re-deriving project conventions from scratch.
 
 | Result | Meaning | Action |
 |---|---|---|
-| **MISSING** (required) | File doesn't exist | Run `npx ctx-audit --init` to scaffold, then fill in TODOs |
+| **MISSING** (required) | File doesn't exist | Run `npx ctx-audit init` to scaffold, then fill in TODOs |
 | **FRESH** | Up to date | Trust the file, read it instead of scanning raw source |
 | **STALE?** | Approaching threshold | Mild caution — spot-check critical claims |
 | **STALE!** | Past threshold | Treat claims as unverified; update the file after your session |
@@ -273,17 +272,21 @@ for backward compatibility.
   patterns in context files are checked against the filesystem. Missing paths
   are reported as warnings.
 
-## `--init` scaffolding
+## `init` scaffolding
 
 ```bash
-npx ctx-audit --init         # interactive: writes AGENTS.md + memory.md to disk
-npx ctx-audit --init | cat   # piped: prints templates to stdout
+npx ctx-audit init         # interactive: writes AGENTS.md + memory.md to disk
+npx ctx-audit init | cat   # piped: prints templates to stdout
 ```
 
 Detects project info from `package.json`, `pyproject.toml`, `Cargo.toml`, or
-`Makefile` and fills in build/test/lint commands. In an interactive terminal
+`Makefile` and fills in build/test/lint commands. Always writes files to the
+repository root, even when run from a subdirectory. In an interactive terminal
 it writes files directly and asks before overwriting existing ones. When
 piped or redirected it prints to stdout for backward compatibility.
+
+> **Note:** The `--init` flag is still supported as a deprecated alias for
+> `npx ctx-audit init` and will not be removed.
 
 ## Companion tools
 
